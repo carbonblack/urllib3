@@ -47,6 +47,7 @@ _key_fields = (
     'key__socks_options',  # dict
     'key_assert_hostname',  # bool or string
     'key_assert_fingerprint',  # str
+    'key_proxy_auth_challenge_callback'  # function
 )
 
 #: The namedtuple class used to construct keys for the connection pool.

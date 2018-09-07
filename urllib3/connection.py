@@ -2,13 +2,14 @@ from __future__ import absolute_import
 import datetime
 import logging
 import os
+import select
 import sys
 import socket
 from socket import error as SocketError, timeout as SocketTimeout
 import warnings
 from .packages import six
 from .packages.six.moves.http_client import HTTPConnection as _HTTPConnection
-from .packages.six.moves.http_client import HTTPException  # noqa: F401
+from .packages.six.moves.http_client import HTTPException, _MAXLINE, LineTooLong  # noqa: F401
 
 try:  # Compiled with SSL?
     import ssl
@@ -121,6 +122,9 @@ class HTTPConnection(_HTTPConnection, object):
         #: The socket options provided by the user. If no options are
         #: provided, we use the default options.
         self.socket_options = kw.pop('socket_options', self.default_socket_options)
+
+        # Callback used for proxies that require a challenge handshake
+        self.proxy_auth_challenge_callback = kw.pop('proxy_auth_challenge_callback', None)
 
         # Superclass also sets self.source_address in Python 2.7+.
         _HTTPConnection.__init__(self, *args, **kw)
@@ -309,6 +313,41 @@ class VerifiedHTTPSConnection(HTTPSConnection):
         self.ca_certs = ca_certs and os.path.expanduser(ca_certs)
         self.ca_cert_dir = ca_cert_dir and os.path.expanduser(ca_cert_dir)
 
+    @staticmethod
+    def _empty_socket(sock):
+        """remove the data present on the socket"""
+        input_ = [sock]
+        while 1:
+            inputready, o, e = select.select(input_, [], [], 0.0)
+            if len(inputready) == 0:
+                break
+            for s in inputready:
+                s.recv(1)
+
+    def _challenge_response_tunnel(self):
+        self.send("CONNECT %s:%d HTTP/1.0\r\n" % (self._tunnel_host,
+                                                  self._tunnel_port))
+        for header, value in self._tunnel_headers.iteritems():
+            self.send("%s: %s\r\n" % (header, value))
+        self.send("\r\n")
+        response = self.response_class(self.sock, strict=self.strict,
+                                       method=self._method)
+        response.begin()
+        code = response.status
+        message = response.reason
+
+        if 407 == code and self.proxy_auth_challenge_callback is not None:
+            final_headers = self.proxy_auth_challenge_callback(response.msg.dict)
+            if final_headers is not None:
+                self._tunnel_headers['Proxy-Authorization'] = final_headers['Proxy-Authorization']
+                self._empty_socket(self.sock)
+                self._tunnel()
+                return
+
+        if code != 200:
+            self.close()
+            raise socket.error("Tunnel connection failed: %d %s" % (code, message))
+
     def connect(self):
         # Add certificate verification
         conn = self._new_conn()
@@ -321,7 +360,7 @@ class VerifiedHTTPSConnection(HTTPSConnection):
             self.sock = conn
             # Calls self._set_hostport(), so self.host is
             # self._tunnel_host below.
-            self._tunnel()
+            self._challenge_response_tunnel()
             # Mark this connection as not reusable
             self.auto_open = 0
 

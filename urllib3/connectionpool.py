@@ -615,6 +615,32 @@ class HTTPConnectionPool(ConnectionPool, RequestMethods):
                                                      retries=retries,
                                                      **response_kw)
 
+            if response.status == 407 and conn.proxy_auth_challenge_callback is not None:
+                self.proxy_headers = conn.proxy_auth_challenge_callback(response.headers)
+                headers.update(self.proxy_headers)
+                response._fp.close()
+
+                httplib_response = self._make_request(conn, method, url,
+                                                      timeout=timeout_obj,
+                                                      body=body, headers=headers,
+                                                      chunked=chunked)
+
+                # If we're going to release the connection in ``finally:``, then
+                # the response doesn't need to know about the connection. Otherwise
+                # it will also try to release it and we'll have a double-release
+                # mess.
+                response_conn = conn if not release_conn else None
+
+                # Pass method to Response for length checking
+                response_kw['request_method'] = method
+
+                # Import httplib's response into our own wrapper object
+                response = self.ResponseCls.from_httplib(httplib_response,
+                                                         pool=self,
+                                                         connection=response_conn,
+                                                         retries=retries,
+                                                         **response_kw)
+
             # Everything went great!
             clean_exit = True
 
